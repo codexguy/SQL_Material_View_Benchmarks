@@ -61,10 +61,14 @@ WidgetID int NOT NULL,
 EventTypeID tinyint NOT NULL REFERENCES [Source].[EventType] (EventTypeID),
 TripID int NOT NULL,
 EventDate datetime NOT NULL,
-PRIMARY KEY (WidgetID, EventTypeID, TripID, EventDate))
+PRIMARY KEY (WidgetID, EventTypeID, EventDate, TripID))
 GO
 
-CREATE INDEX IDX_Event_Date ON [Source].[Event] (EventDate, EventTypeID)
+CREATE INDEX IDX_Event_Date ON [Source].[Event] (EventDate, EventTypeID) INCLUDE (WidgetID)
+GO
+CREATE INDEX IDX_Event_Widget ON [Source].[Event] (WidgetID, TripID, EventDate) INCLUDE (EventTypeID)
+GO
+CREATE INDEX IDX_Event_Trip ON [Source].[Event] (TripID, WidgetID)
 GO
 
 CREATE TABLE [Dest].[WidgetLatestState] (
