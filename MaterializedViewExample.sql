@@ -99,7 +99,7 @@ SELECT
 		FROM [Source].[Event] e
 		WHERE e.WidgetID = ae.WidgetID) AS LastEventDate
 	, ae.EventDate AS ArrivalDate
-	, (SELECT TOP 1 de.EventDate
+	, (SELECT MAX(de.EventDate)
 		FROM [Source].[Event] de
 		WHERE de.EventTypeID = 3
 		AND de.WidgetID = ae.WidgetID
@@ -110,14 +110,13 @@ SELECT
 			WHERE ae.WidgetID = dc.WidgetID
 			AND ae.TripID = dc.TripID
 			AND dc.EventTypeID = 4
-			AND dc.EventDate > de.EventDate)
-		ORDER BY de.EventDate DESC) AS DepartureDate
+			AND dc.EventDate > de.EventDate)) AS DepartureDate
 FROM
 	[Source].[Event] ae
 WHERE
 	ae.EventTypeID = 1
 AND	ae.EventDate =
-	(SELECT TOP 1 la.EventDate
+	(SELECT MAX(la.EventDate)
 	FROM [Source].[Event] la
 	WHERE la.EventTypeID = 1
 	AND la.WidgetID = ae.WidgetID
@@ -127,8 +126,7 @@ AND	ae.EventDate =
 		WHERE la.WidgetID = ac.WidgetID
 		AND la.TripID = ac.TripID
 		AND ac.EventTypeID = 2
-		AND ac.EventDate > la.EventDate)
-	ORDER BY la.EventDate DESC)
+		AND ac.EventDate > la.EventDate))
 GO
 
 TRUNCATE TABLE [Source].[Event]
@@ -456,3 +454,53 @@ WHERE w.DepartureDate IS NULL
 PRINT 'Onsite Count, using NON-materialized view: ' + STR(DATEDIFF(ms, @start, SYSDATETIME()));
 PRINT @temp;
 GO
+
+
+
+-- Note: having a unique index (or PK) on your natural key (WidgetID) is recommended!
+MERGE [Dest].[WidgetLatestState] AS a
+ USING (
+ -- TODO: Replace with appropriate source query
+ SELECT
+   v.[WidgetID]
+	, v.[LastTripID]
+	, v.[LastEventDate]
+	, v.[ArrivalDate]
+	, v.[DepartureDate]
+ FROM
+   [Dest].[WidgetLatestState] v
+ ) AS T
+ ON
+ (
+   a.[WidgetID] = t.[WidgetID]
+ )
+
+WHEN MATCHED 
+     AND ((a.[LastTripID] <> CONVERT(int, t.[LastTripID]))
+          OR (a.[LastEventDate] <> CONVERT(datetime, t.[LastEventDate]))
+          OR (a.[ArrivalDate] <> CONVERT(datetime, t.[ArrivalDate]))
+          OR (a.[DepartureDate] <> CONVERT(datetime, t.[DepartureDate]) OR (a.[DepartureDate] IS NULL AND t.[DepartureDate] IS NOT NULL) OR (a.[DepartureDate] IS NOT NULL AND t.[DepartureDate] IS NULL))) THEN
+     UPDATE
+      SET LastTripID = t.LastTripID
+	, LastEventDate = t.LastEventDate
+	, ArrivalDate = t.ArrivalDate
+	, DepartureDate = t.DepartureDate
+
+WHEN NOT MATCHED BY TARGET THEN
+      INSERT (
+        WidgetID
+	, LastTripID
+	, LastEventDate
+	, ArrivalDate
+	, DepartureDate
+      ) VALUES (
+        t.[WidgetID]
+	, t.[LastTripID]
+	, t.[LastEventDate]
+	, t.[ArrivalDate]
+	, t.[DepartureDate]
+      )
+
+WHEN NOT MATCHED BY SOURCE THEN
+     DELETE;
+;
