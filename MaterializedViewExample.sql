@@ -22,6 +22,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 For more details on the usage of this script, visit www.xskrape.com
+and the article at: https://www.xskrape.com/home/article/Merging-Data-with-Ease
 */
 
 IF NOT EXISTS (SELECT 0 FROM sys.schemas s WHERE s.name = 'Source')
@@ -454,53 +455,3 @@ WHERE w.DepartureDate IS NULL
 PRINT 'Onsite Count, using NON-materialized view: ' + STR(DATEDIFF(ms, @start, SYSDATETIME()));
 PRINT @temp;
 GO
-
-
-
--- Note: having a unique index (or PK) on your natural key (WidgetID) is recommended!
-MERGE [Dest].[WidgetLatestState] AS a
- USING (
- -- TODO: Replace with appropriate source query
- SELECT
-   v.[WidgetID]
-	, v.[LastTripID]
-	, v.[LastEventDate]
-	, v.[ArrivalDate]
-	, v.[DepartureDate]
- FROM
-   [Dest].[WidgetLatestState] v
- ) AS T
- ON
- (
-   a.[WidgetID] = t.[WidgetID]
- )
-
-WHEN MATCHED 
-     AND ((a.[LastTripID] <> CONVERT(int, t.[LastTripID]))
-          OR (a.[LastEventDate] <> CONVERT(datetime, t.[LastEventDate]))
-          OR (a.[ArrivalDate] <> CONVERT(datetime, t.[ArrivalDate]))
-          OR (a.[DepartureDate] <> CONVERT(datetime, t.[DepartureDate]) OR (a.[DepartureDate] IS NULL AND t.[DepartureDate] IS NOT NULL) OR (a.[DepartureDate] IS NOT NULL AND t.[DepartureDate] IS NULL))) THEN
-     UPDATE
-      SET LastTripID = t.LastTripID
-	, LastEventDate = t.LastEventDate
-	, ArrivalDate = t.ArrivalDate
-	, DepartureDate = t.DepartureDate
-
-WHEN NOT MATCHED BY TARGET THEN
-      INSERT (
-        WidgetID
-	, LastTripID
-	, LastEventDate
-	, ArrivalDate
-	, DepartureDate
-      ) VALUES (
-        t.[WidgetID]
-	, t.[LastTripID]
-	, t.[LastEventDate]
-	, t.[ArrivalDate]
-	, t.[DepartureDate]
-      )
-
-WHEN NOT MATCHED BY SOURCE THEN
-     DELETE;
-;
