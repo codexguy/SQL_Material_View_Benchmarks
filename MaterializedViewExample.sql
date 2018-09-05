@@ -260,9 +260,9 @@ PRINT @@ROWCOUNT;
 PRINT 'No material change MERGE elapsed: ' + STR(DATEDIFF(ms, @start, SYSDATETIME()));
 
 -- Use of a control date filter with MERGE
-SET @start = SYSDATETIME();
 DECLARE @lastprocessed datetime2;
 SELECT @lastprocessed = MAX(e.EventDate) FROM [Source].[Event] e;
+SET @start = SYSDATETIME();
 
 MERGE [Dest].[WidgetLatestState] AS a
  USING (
