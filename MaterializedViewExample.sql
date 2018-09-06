@@ -23,6 +23,7 @@ SOFTWARE.
 
 For more details on the usage of this script, visit www.xskrape.com
 and the article at: https://www.xskrape.com/home/article/Merging-Data-with-Ease
+and at: https://www.c-sharpcorner.com/article/using-materialized-views-effectively/
 */
 
 IF NOT EXISTS (SELECT 0 FROM sys.schemas s WHERE s.name = 'Source')
@@ -94,40 +95,51 @@ GO
 CREATE VIEW [Dest].[uv_WidgetLatestState]
 AS
 SELECT
-	ae.WidgetID
-	, ae.TripID AS LastTripID
-	, (SELECT MAX(e.EventDate)
-		FROM [Source].[Event] e
-		WHERE e.WidgetID = ae.WidgetID) AS LastEventDate
-	, ae.EventDate AS ArrivalDate
+	lw.WidgetID
+	, la.LastTripID
+	, lw.LastEventDate
+	, la.ArrivalDate
 	, (SELECT MAX(de.EventDate)
 		FROM [Source].[Event] de
 		WHERE de.EventTypeID = 3
-		AND de.WidgetID = ae.WidgetID
-		AND de.TripID = ae.TripID
+		AND de.WidgetID = lw.WidgetID
+		AND de.TripID = la.LastTripID
 		AND NOT EXISTS
 			(SELECT 0
 			FROM [Source].[Event] dc
-			WHERE ae.WidgetID = dc.WidgetID
-			AND ae.TripID = dc.TripID
+			WHERE lw.WidgetID = dc.WidgetID
+			AND la.LastTripID = dc.TripID
 			AND dc.EventTypeID = 4
 			AND dc.EventDate > de.EventDate)) AS DepartureDate
 FROM
-	[Source].[Event] ae
-WHERE
-	ae.EventTypeID = 1
-AND	ae.EventDate =
-	(SELECT MAX(la.EventDate)
-	FROM [Source].[Event] la
-	WHERE la.EventTypeID = 1
-	AND la.WidgetID = ae.WidgetID
-	AND NOT EXISTS
-		(SELECT 0
-		FROM [Source].[Event] ac
-		WHERE la.WidgetID = ac.WidgetID
-		AND la.TripID = ac.TripID
-		AND ac.EventTypeID = 2
-		AND ac.EventDate > la.EventDate))
+	(SELECT
+		e.WidgetID
+		, MAX(e.EventDate) AS LastEventDate
+	FROM
+		[Source].[Event] e
+	GROUP BY
+		e.WidgetID) lw
+	LEFT OUTER JOIN
+	(SELECT
+		ae.WidgetID
+		, ae.TripID AS LastTripID
+		, ae.EventDate AS ArrivalDate
+	FROM
+		[Source].[Event] ae
+	WHERE
+		ae.EventTypeID = 1
+	AND	ae.EventDate =
+		(SELECT MAX(la.EventDate)
+		FROM [Source].[Event] la
+		WHERE la.EventTypeID = 1
+		AND la.WidgetID = ae.WidgetID
+		AND NOT EXISTS
+			(SELECT 0
+			FROM [Source].[Event] ac
+			WHERE la.WidgetID = ac.WidgetID
+			AND la.TripID = ac.TripID
+			AND ac.EventTypeID = 2
+			AND ac.EventDate > la.EventDate))) AS la ON lw.WidgetID = la.WidgetID
 GO
 
 TRUNCATE TABLE [Source].[Event]
@@ -157,7 +169,9 @@ SELECT
 	, ArrivalDate
 	, DepartureDate
 FROM
-	[Dest].[uv_WidgetLatestState];
+	[Dest].[uv_WidgetLatestState]
+WHERE
+	LastTripID IS NOT NULL;
 
 PRINT @@ROWCOUNT;
 PRINT 'TRUNCATE/INSERT elapsed: ' + STR(DATEDIFF(ms, @start, SYSDATETIME()));
@@ -181,14 +195,14 @@ MERGE [Dest].[WidgetLatestState] AS a
    a.[WidgetID] = t.[WidgetID]
  )
 
-WHEN MATCHED THEN
+WHEN MATCHED AND t.ArrivalDate IS NOT NULL THEN
      UPDATE
       SET LastTripID = t.LastTripID
 	, LastEventDate = t.LastEventDate
 	, ArrivalDate = t.ArrivalDate
 	, DepartureDate = t.DepartureDate
 
-WHEN NOT MATCHED BY TARGET THEN
+WHEN NOT MATCHED BY TARGET AND t.ArrivalDate IS NOT NULL THEN
       INSERT (
         WidgetID
 	, LastTripID
@@ -203,7 +217,7 @@ WHEN NOT MATCHED BY TARGET THEN
 	, t.[DepartureDate]
       )
 
-WHEN NOT MATCHED BY SOURCE THEN
+WHEN MATCHED AND t.ArrivalDate IS NULL THEN
      DELETE;
 
 PRINT @@ROWCOUNT;
@@ -229,6 +243,7 @@ MERGE [Dest].[WidgetLatestState] AS a
  )
 
 WHEN MATCHED 
+	 AND t.ArrivalDate IS NOT NULL
      AND ((a.[LastTripID] <> CONVERT(int, t.[LastTripID]))
           OR (a.[LastEventDate] <> CONVERT(datetime, t.[LastEventDate]))
           OR (a.[ArrivalDate] <> CONVERT(datetime, t.[ArrivalDate]))
@@ -239,7 +254,7 @@ WHEN MATCHED
 	, ArrivalDate = t.ArrivalDate
 	, DepartureDate = t.DepartureDate
 
-WHEN NOT MATCHED BY TARGET THEN
+WHEN NOT MATCHED BY TARGET AND t.ArrivalDate IS NOT NULL THEN
       INSERT (
         WidgetID
 	, LastTripID
@@ -254,7 +269,7 @@ WHEN NOT MATCHED BY TARGET THEN
 	, t.[DepartureDate]
       )
 
-WHEN NOT MATCHED BY SOURCE THEN
+WHEN MATCHED AND t.ArrivalDate IS NULL THEN
      DELETE;
 
 PRINT @@ROWCOUNT;
@@ -276,7 +291,7 @@ MERGE [Dest].[WidgetLatestState] AS a
  FROM
    [Dest].[uv_WidgetLatestState] v
  WHERE
-   LastEventDate > @lastprocessed
+   v.LastEventDate > @lastprocessed
  ) AS T
  ON
  (
@@ -284,7 +299,8 @@ MERGE [Dest].[WidgetLatestState] AS a
  )
 
 WHEN MATCHED 
-     AND ((a.[LastTripID] <> CONVERT(int, t.[LastTripID]))
+	 AND t.ArrivalDate IS NOT NULL
+     AND t.LastEventDate > @lastprocessed AND ((a.[LastTripID] <> CONVERT(int, t.[LastTripID]))
           OR (a.[LastEventDate] <> CONVERT(datetime, t.[LastEventDate]))
           OR (a.[ArrivalDate] <> CONVERT(datetime, t.[ArrivalDate]))
           OR (a.[DepartureDate] <> CONVERT(datetime, t.[DepartureDate]) OR (a.[DepartureDate] IS NULL AND t.[DepartureDate] IS NOT NULL) OR (a.[DepartureDate] IS NOT NULL AND t.[DepartureDate] IS NULL))) THEN
@@ -294,7 +310,7 @@ WHEN MATCHED
 	, ArrivalDate = t.ArrivalDate
 	, DepartureDate = t.DepartureDate
 
-WHEN NOT MATCHED BY TARGET THEN
+WHEN NOT MATCHED BY TARGET AND t.ArrivalDate IS NOT NULL THEN
       INSERT (
         WidgetID
 	, LastTripID
@@ -309,7 +325,7 @@ WHEN NOT MATCHED BY TARGET THEN
 	, t.[DepartureDate]
       )
 
-WHEN NOT MATCHED BY SOURCE AND LastEventDate > @lastprocessed THEN
+WHEN MATCHED AND t.ArrivalDate IS NULL THEN
      DELETE;
 
 PRINT @@ROWCOUNT;
@@ -337,6 +353,7 @@ CREATE PROCEDURE Dest.up_WidgetLatestState_Load
 AS
 BEGIN
 
+DECLARE @rc int;
 DECLARE @start datetime2;
 SET @start = SYSDATETIME();
 
@@ -356,7 +373,7 @@ MERGE [Dest].[WidgetLatestState] AS a
  FROM
    [Dest].[uv_WidgetLatestState] v
  WHERE
-   LastEventDate >= @lastprocessed
+   v.LastEventDate > @lastprocessed
  ) AS T
  ON
  (
@@ -364,7 +381,8 @@ MERGE [Dest].[WidgetLatestState] AS a
  )
 
 WHEN MATCHED 
-     AND ((a.[LastTripID] <> CONVERT(int, t.[LastTripID]))
+     AND t.ArrivalDate IS NOT NULL
+     AND t.LastEventDate >= @lastprocessed AND ((a.[LastTripID] <> CONVERT(int, t.[LastTripID]))
           OR (a.[LastEventDate] <> CONVERT(datetime, t.[LastEventDate]))
           OR (a.[ArrivalDate] <> CONVERT(datetime, t.[ArrivalDate]))
           OR (a.[DepartureDate] <> CONVERT(datetime, t.[DepartureDate]) OR (a.[DepartureDate] IS NULL AND t.[DepartureDate] IS NOT NULL) OR (a.[DepartureDate] IS NOT NULL AND t.[DepartureDate] IS NULL))) THEN
@@ -374,7 +392,7 @@ WHEN MATCHED
 	, ArrivalDate = t.ArrivalDate
 	, DepartureDate = t.DepartureDate
 
-WHEN NOT MATCHED BY TARGET THEN
+WHEN NOT MATCHED BY TARGET AND t.ArrivalDate IS NOT NULL THEN
       INSERT (
         WidgetID
 	, LastTripID
@@ -389,16 +407,17 @@ WHEN NOT MATCHED BY TARGET THEN
 	, t.[DepartureDate]
       )
 
-WHEN NOT MATCHED BY SOURCE AND LastEventDate >= @lastprocessed THEN
+WHEN MATCHED AND t.ArrivalDate IS NULL THEN
      DELETE;
 
-PRINT @@ROWCOUNT;
+SET @rc = @@ROWCOUNT;
 
 UPDATE dbo.SystemParameter
 SET KeyValue = CONVERT(varchar(100), @start)
 WHERE KeyName = 'WidgetLastLoadDate';
 
 PRINT 'In Proc, Control date, material changes only MERGE elapsed: ' + STR(DATEDIFF(ms, @start, SYSDATETIME()));
+PRINT @rc;
 
 END
 GO
@@ -441,7 +460,7 @@ SET @start = SYSDATETIME();
 
 SELECT @temp = COUNT(*)
 FROM [Dest].[WidgetLatestState] w
-WHERE w.DepartureDate IS NULL
+WHERE w.DepartureDate IS NULL;
 
 PRINT 'Onsite Count, using materialized view: ' + STR(DATEDIFF(ms, @start, SYSDATETIME()));
 PRINT @temp;
@@ -451,6 +470,7 @@ SET @start = SYSDATETIME();
 SELECT @temp = COUNT(*)
 FROM [Dest].[uv_WidgetLatestState] w
 WHERE w.DepartureDate IS NULL
+AND w.ArrivalDate IS NOT NULL;
 
 PRINT 'Onsite Count, using NON-materialized view: ' + STR(DATEDIFF(ms, @start, SYSDATETIME()));
 PRINT @temp;
