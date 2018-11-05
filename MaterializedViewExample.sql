@@ -475,3 +475,219 @@ AND w.ArrivalDate IS NOT NULL;
 PRINT 'Onsite Count, using NON-materialized view: ' + STR(DATEDIFF(ms, @start, SYSDATETIME()));
 PRINT @temp;
 GO
+
+/********************************************************************************************/
+-- Queued approach changes
+
+IF OBJECT_ID('[dbo].[WidgetLatestStateQueue]') IS NOT NULL
+	DROP TABLE [dbo].[WidgetLatestStateQueue]
+GO
+
+CREATE TABLE [dbo].[WidgetLatestStateQueue]
+(WidgetID int NOT NULL PRIMARY KEY)
+GO
+
+IF OBJECT_ID('dbo.up_WidgetLatestStateQueue_Populate') IS NOT NULL
+	DROP PROC dbo.up_WidgetLatestStateQueue_Populate
+GO
+
+CREATE PROCEDURE dbo.up_WidgetLatestStateQueue_Populate
+	@start datetime2 = NULL
+AS
+BEGIN
+	SET NOCOUNT ON;
+	PRINT CONVERT(varchar, GETDATE(), 114);
+
+	IF @start IS NULL
+		SET @start = DATEADD(dd, -1, SYSDATETIME());
+
+	INSERT dbo.WidgetLatestStateQueue (WidgetID)
+	SELECT DISTINCT e.WidgetID
+	FROM 
+		[Source].[Event] e
+	WHERE
+		e.EventDate >= @start
+	AND NOT EXISTS (SELECT 0 FROM dbo.WidgetLatestStateQueue q WHERE e.WidgetID = q.WidgetID);
+
+	PRINT CONVERT(varchar, GETDATE(), 114);
+END
+GO
+
+IF OBJECT_ID('dbo.up_WidgetLatestStateQueue_ByID') IS NOT NULL
+	DROP PROC dbo.up_WidgetLatestStateQueue_ByID
+GO
+
+CREATE PROCEDURE dbo.up_WidgetLatestStateQueue_ByID
+	@WidgetID int
+AS
+BEGIN
+	MERGE [Dest].[WidgetLatestState] AS a
+	 USING (
+	 SELECT
+	   v.[WidgetID]
+		, v.[LastTripID]
+		, v.[LastEventDate]
+		, v.[ArrivalDate]
+		, v.[DepartureDate]
+	 FROM
+	   [Dest].[uv_WidgetLatestState] v
+	 WHERE
+	   v.WidgetID = @WidgetID
+	 ) AS T
+	 ON
+	 (
+	   a.[WidgetID] = t.[WidgetID]
+	 )
+
+	WHEN MATCHED 
+		 AND t.ArrivalDate IS NOT NULL
+		 AND ((a.[LastTripID] <> CONVERT(int, t.[LastTripID]))
+			  OR (a.[LastEventDate] <> CONVERT(datetime, t.[LastEventDate]))
+			  OR (a.[ArrivalDate] <> CONVERT(datetime, t.[ArrivalDate]))
+			  OR (a.[DepartureDate] <> CONVERT(datetime, t.[DepartureDate]) OR (a.[DepartureDate] IS NULL AND t.[DepartureDate] IS NOT NULL) OR (a.[DepartureDate] IS NOT NULL AND t.[DepartureDate] IS NULL))) THEN
+		 UPDATE
+		  SET LastTripID = t.LastTripID
+		, LastEventDate = t.LastEventDate
+		, ArrivalDate = t.ArrivalDate
+		, DepartureDate = t.DepartureDate
+
+	WHEN NOT MATCHED BY TARGET AND t.ArrivalDate IS NOT NULL THEN
+		  INSERT (
+			WidgetID
+		, LastTripID
+		, LastEventDate
+		, ArrivalDate
+		, DepartureDate
+		  ) VALUES (
+			t.[WidgetID]
+		, t.[LastTripID]
+		, t.[LastEventDate]
+		, t.[ArrivalDate]
+		, t.[DepartureDate]
+		  )
+
+	WHEN MATCHED AND t.ArrivalDate IS NULL THEN
+		 DELETE;
+END
+GO
+
+IF OBJECT_ID('dbo.up_WidgetLatestStateQueue_Process') IS NOT NULL
+	DROP PROC dbo.up_WidgetLatestStateQueue_Process
+GO
+
+CREATE PROCEDURE dbo.up_WidgetLatestStateQueue_Process
+AS
+BEGIN
+	SET NOCOUNT ON;
+	PRINT CONVERT(varchar, GETDATE(), 114);
+
+	DECLARE @WidgetID int;
+	SELECT TOP 1 @WidgetID = WidgetID FROM dbo.WidgetLatestStateQueue;
+
+	WHILE @WidgetID IS NOT NULL
+	BEGIN
+		EXEC dbo.up_WidgetLatestStateQueue_ByID @WidgetID;
+
+		DELETE dbo.WidgetLatestStateQueue WHERE WidgetID = @WidgetID;
+
+		SET @WidgetID = NULL;
+		SELECT TOP 1 @WidgetID = WidgetID FROM dbo.WidgetLatestStateQueue;
+	END
+
+	PRINT CONVERT(varchar, GETDATE(), 114);
+END
+GO
+
+IF OBJECT_ID('dbo.up_WidgetLatestStateQueue_ProcessAll') IS NOT NULL
+	DROP PROC dbo.up_WidgetLatestStateQueue_ProcessAll
+GO
+
+CREATE PROCEDURE dbo.up_WidgetLatestStateQueue_ProcessAll
+	@start datetime2 = NULL
+AS
+BEGIN
+	EXEC dbo.up_WidgetLatestStateQueue_Populate @start;
+
+	DECLARE @cnt int;
+	SELECT @cnt = COUNT(*)
+	FROM dbo.WidgetLatestStateQueue;
+
+	PRINT 'To process: ' + STR(@cnt);
+
+	EXEC dbo.up_WidgetLatestStateQueue_Process;
+END
+GO
+
+-- We will test performance using all on-premise widgets
+INSERT dbo.WidgetLatestStateQueue (WidgetID)
+SELECT w.WidgetID
+FROM [Dest].[uv_WidgetLatestState] w
+WHERE w.DepartureDate IS NULL
+AND w.ArrivalDate IS NOT NULL;
+GO
+
+EXEC dbo.up_WidgetLatestStateQueue_Process
+GO
+
+INSERT dbo.WidgetLatestStateQueue (WidgetID)
+SELECT w.WidgetID
+FROM [Dest].[uv_WidgetLatestState] w
+WHERE w.DepartureDate IS NULL
+AND w.ArrivalDate IS NOT NULL;
+GO
+
+-- This example tends to show an unfavorable performance profile for row-by-row compared to a set-based MERGE.
+-- This is a good reason to evaluate your own workloads and likely update patterns - as noted in my article on queued merging, I have a production example that clearly
+--  favors row-by-row by more than 50% (90% with parallelism). In any case, this example demonstrates one way of performing row-by-row merges.
+PRINT CONVERT(varchar, GETDATE(), 114);
+
+	MERGE [Dest].[WidgetLatestState] AS a
+	 USING (
+	 SELECT
+	   v.[WidgetID]
+		, v.[LastTripID]
+		, v.[LastEventDate]
+		, v.[ArrivalDate]
+		, v.[DepartureDate]
+	 FROM
+	   [Dest].[uv_WidgetLatestState] v
+	   JOIN dbo.WidgetLatestStateQueue q
+		ON v.WidgetID = q.WidgetID
+	 ) AS T
+	 ON
+	 (
+	   a.[WidgetID] = t.[WidgetID]
+	 )
+
+	WHEN MATCHED 
+		 AND t.ArrivalDate IS NOT NULL
+		 AND ((a.[LastTripID] <> CONVERT(int, t.[LastTripID]))
+			  OR (a.[LastEventDate] <> CONVERT(datetime, t.[LastEventDate]))
+			  OR (a.[ArrivalDate] <> CONVERT(datetime, t.[ArrivalDate]))
+			  OR (a.[DepartureDate] <> CONVERT(datetime, t.[DepartureDate]) OR (a.[DepartureDate] IS NULL AND t.[DepartureDate] IS NOT NULL) OR (a.[DepartureDate] IS NOT NULL AND t.[DepartureDate] IS NULL))) THEN
+		 UPDATE
+		  SET LastTripID = t.LastTripID
+		, LastEventDate = t.LastEventDate
+		, ArrivalDate = t.ArrivalDate
+		, DepartureDate = t.DepartureDate
+
+	WHEN NOT MATCHED BY TARGET AND t.ArrivalDate IS NOT NULL THEN
+		  INSERT (
+			WidgetID
+		, LastTripID
+		, LastEventDate
+		, ArrivalDate
+		, DepartureDate
+		  ) VALUES (
+			t.[WidgetID]
+		, t.[LastTripID]
+		, t.[LastEventDate]
+		, t.[ArrivalDate]
+		, t.[DepartureDate]
+		  )
+
+	WHEN MATCHED AND t.ArrivalDate IS NULL THEN
+		 DELETE;
+
+PRINT CONVERT(varchar, GETDATE(), 114);
+GO
